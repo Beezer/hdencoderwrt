@@ -1,0 +1,10 @@
+#!/bin/sh /etc/rc.common
+# Sample init script reading its
+# configuration from /etc/config/package
+
+START=50
+
+start_service() {
+	/bin/hdpvrd > /dev/null
+}
+
