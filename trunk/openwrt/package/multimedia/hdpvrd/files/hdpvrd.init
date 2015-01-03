@@ -1,10 +1,13 @@
 #!/bin/sh /etc/rc.common
-# Sample init script reading its
-# configuration from /etc/config/package
 
+USE_PROCD=1
 START=50
 
 start_service() {
-	/bin/hdpvrd > /dev/null
+	procd_open_instance
+	procd_set_param command /bin/hdpvrd 
+	procd_set_param respawn
+	procd_close_instance
+
 }
 
