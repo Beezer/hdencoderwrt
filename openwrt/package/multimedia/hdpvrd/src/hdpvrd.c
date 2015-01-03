@@ -106,7 +106,7 @@ char *getValue(char *key, struct post_data *data);
 int main(int argv, char** argc) {
     signal(SIGPIPE, SIG_IGN);
 
-    daemon(1,1);
+    //daemon(1,1);
 
     int host_port=PORT;
 
@@ -584,10 +584,8 @@ void *StreamHandler(void* lp) {
         usleep(5000);
 
         /** setup descriptors for event polling **/
-        fds[0].fd = STDIN_FILENO;
+        fds[0].fd = devfd;
         fds[0].events = POLLIN;
-        fds[1].fd = devfd;
-        fds[1].events = POLLIN;
 
         /** start the recording loop **/
         int countdown=0;
@@ -603,7 +601,7 @@ void *StreamHandler(void* lp) {
                     tm_info = localtime(&timer);
                     strftime(buffer,80,"%Y-%m-%d %H:%M:%S", tm_info);
                     fprintf(stderr, "%s  Waiting for ready (%d)...\n", buffer, countdown);
-                    usleep(300);
+                    usleep(100);
                     countdown--;
                 } else {
                     countdown=0;
@@ -621,10 +619,10 @@ void *StreamHandler(void* lp) {
                     perror("Unable to reopen the device");
                     exit(EXIT_FAILURE);
                 } else {
-                    fds[1].fd = devfd;
-                    fds[1].events = POLLIN;
-                    fprintf(stderr,"%s Device reaquired. Usleep for 5k for data\n",buffer);
-                    usleep(5000);
+                    fds[0].fd = devfd;
+                    fds[0].events = POLLIN;
+                    fprintf(stderr,"%s Device reaquired. Usleep for data\n",buffer);
+                    usleep(1000);
                     continue;
                 }
             } else if(-1 == retval) {
@@ -632,10 +630,6 @@ void *StreamHandler(void* lp) {
                 perror("Polling failed");
                 break;
             } else if(fds[0].revents & POLLIN) {
-                //printf("user quit\n");
-                //fprintf(stderr, "User quit\n");
-                break;
-            } else if(fds[1].revents & POLLIN) {
                 nbytes = read(devfd, membuf, MEMBUF_SIZE);
                 if(0 > nbytes) {
                     switch(errno) {
@@ -709,7 +703,7 @@ void *StreamHandler(void* lp) {
                     perror("Short read");
                     exit(EXIT_FAILURE);
                 }
-            } else if(fds[1].revents & POLLERR) {
+            } else if(fds[0].revents & POLLERR) {
                 printf("Pollerr\n");
                 perror("pollerr");
                 exit(EXIT_FAILURE);
