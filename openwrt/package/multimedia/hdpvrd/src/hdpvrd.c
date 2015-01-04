@@ -42,31 +42,13 @@
 //thread prototype for the connected children.
 void *SocketHandler(void*); //handles accepted sockets
 void *StreamHandler(void*); //handles reading from hdpvr and writing to outputs
-void *DiskIOHandler(void*); //buffered writer, writes data to disk.
+void *IOHandler(void*); //buffered writer
 void *BufferCleanUp(void*); //cleans up buffers if they remain free for 5 seconds
-void *EventHandling(void*); //launches events when they are due.
-
-
-#define EVENT_TYPE_ECHO 0
-#define EVENT_TYPE_STARTREC 1
-#define EVENT_TYPE_STOPREC 2
-#define EVENT_TYPE_CHANNEL 3
-//event
-struct event {
-    time_t eventTime;
-    int type;
-    char *internalId;
-    char *externalId;
-    char *data;
-    struct event *next;
-};
 
 //data we'll share between all the threads.
 struct shared {
     pthread_mutex_t sharedlock; // used to protect the fd array, and recording count
     int outfds[MAX_BUFFERED_OUTPUTS];
-    char *outfdIntIds[MAX_BUFFERED_OUTPUTS];
-    char *outfdExtIds[MAX_BUFFERED_OUTPUTS];
     char buffer[80];
     int recording;//no of fd's we are writing to.
 
@@ -80,13 +62,7 @@ struct shared {
     int historyUsed[MAX_BUFFER_COUNT_HISTORY];
     int historyNowIndex;
 
-    pthread_mutex_t eventLock;
-    struct event *events;
 };
-char *UIIntID = "UI.Int.Id";
-char *UIExtID = "UI.Ext.Id";
-char *SocketIntED = "Sock.Int.Id";
-char *SocketExtED = "Sock.Ext.Id";
 
 //data we'll give to each thread uniquely.
 struct data {
@@ -94,19 +70,8 @@ struct data {
     struct shared *data; //pointer to shared data.
 };
 
-//http post..
-struct post_data {
-    int noOfKeys;
-    char **keys;
-    char **values;
-};
-struct post_data *getPostData(char *buffer);
-char *getValue(char *key, struct post_data *data);
-
 int main(int argv, char** argc) {
     signal(SIGPIPE, SIG_IGN);
-
-    //daemon(1,1);
 
     int host_port=PORT;
 
@@ -133,22 +98,17 @@ int main(int argv, char** argc) {
 
     pthread_mutex_init(&(global->sharedlock), NULL);
     pthread_mutex_init(&(global->diskiolock), NULL);
-    pthread_mutex_init(&(global->eventLock), NULL);
 
-    //start the disk writing thread, it will sleep until data is ready to write
-    pthread_create(&thread_id,0,&DiskIOHandler, (void*)global );
+    //start the IO thread, it will sleep until data is ready to write
+    pthread_create(&thread_id,0,&IOHandler, (void*)global );
     pthread_detach(thread_id);
 
-    //start the device read/write thread, it will sleep until there are clients to write to.
+    //start the device read thread, it will sleep until there are clients to write to.
     pthread_create(&thread_id,0,&StreamHandler, (void*)global );
     pthread_detach(thread_id);
 
     //start the buffer cleanup thread.. it'll only kick in when the buffers exceed > 1024
     pthread_create(&thread_id,0,&BufferCleanUp, (void*)global );
-    pthread_detach(thread_id);
-
-    //start the event handling thread..
-    pthread_create(&thread_id,0,&EventHandling, (void*)global );
     pthread_detach(thread_id);
 
     struct data *datainst;
@@ -180,6 +140,7 @@ int main(int argv, char** argc) {
         fprintf(stderr,"Error binding to socket, make sure nothing else is listening on this port %d\n",errno);
         goto FINISH;
     }
+
     if(listen( hsock, 10) == -1 ) {
         fprintf(stderr, "Error listening %d\n",errno);
         goto FINISH;
@@ -194,7 +155,7 @@ int main(int argv, char** argc) {
         time(&timer);
         tm_info = localtime(&timer);
         strftime(tbuf,80,"%Y-%m-%d %H:%M:%S", tm_info);
-        //printf("%s Waiting for a connection on port %d \n", tbuf, PORT);
+        printf("%s Waiting for a connection on port %d \n", tbuf, PORT);
         //allocate the block we'll send to the thread
         datainst = (struct data *)malloc(sizeof(struct data));
         //hook up our global shared data struct..
@@ -205,7 +166,7 @@ int main(int argv, char** argc) {
             tm_info = localtime(&timer);
             strftime(tbuf,80,"%Y-%m-%d %H:%M:%S", tm_info);
             pthread_mutex_lock(&(global->sharedlock));
-            //printf("%s Received connection from %s\n",tbuf,inet_ntoa(sadr.sin_addr));
+            printf("%s Received connection from %s\n",tbuf,inet_ntoa(sadr.sin_addr));
             pthread_mutex_unlock(&(global->sharedlock));
             pthread_create(&thread_id,0,&SocketHandler, (void*)datainst );
             pthread_detach(thread_id);
@@ -216,120 +177,6 @@ int main(int argv, char** argc) {
 
 FINISH:
     free(global);
-    return 0;
-}
-
-int initiateRecording(struct shared *global, int outfd, char* intid, char* extid);
-int stopRecording(struct shared *global, char* intid, char* extid);
-
-void *EventHandling(void* lp) {
-    struct shared *global = (struct shared *)lp;
-    struct event *current;
-    double done=0;
-
-    while(1){
-        sleep(1);
-        //obtain the event to process.. if any.. with lock!.
-        pthread_mutex_lock(&(global->eventLock));
-        if(global->events!=NULL){
-            time_t now;
-            time(&now);
-            current = global->events;
-
-            done=difftime(current->eventTime,now);
-
-            while(done<0){
-                //process the event.
-                if(current->type==EVENT_TYPE_ECHO){
-                    printf("EVENT: %s\n",current->data);
-          		if(current->externalId!=UIExtID && current->externalId!=SocketExtED){
-        				free(current->externalId);
-        			}
-        			if(current->internalId!=UIIntID && current->internalId!=SocketIntED){
-        				free(current->internalId);
-        			}
-                }
-                else if(current->type==EVENT_TYPE_STARTREC){
-					int outfd;
-                	char *filename = NULL;
-
-                	if(current->data!=NULL){
-                		int filenamelen = strlen(current->data) - (strstr(current->data,"?") - current->data);
-                		filename = (char*)calloc(filenamelen+1, sizeof(char));
-                		strncpy(filename,strstr(current->data,"?")+1,filenamelen);
-                	}
-                	if(filename==NULL){
-						char *tbuf = (char *)calloc(80,sizeof(char));
-						time_t timer;
-						struct tm* tm_info;
-						time(&timer);
-						tm_info = localtime(&timer);
-						strftime(tbuf,80,"%Y%m%d%H%M%S.ts", tm_info);
-						filename = tbuf;
-                	}
-                	printf("Scheduled recording request...");
-                    /** open the output file **/
-                    if(-1 == (outfd = open(filename, O_CREAT | O_RDWR, S_IRWXU | S_IRWXG))) {
-                        perror("Unable to open output file");
-                    } else {
-                        int started=initiateRecording(global,outfd,current->internalId,current->externalId);
-                        if(!started) {
-                            printf("Already recording, new request ignored\n");
-                        } else {
-                            printf("Recording now in progress\n");
-                        }
-                    }
-
-                    free(filename);
-                }
-                else if(current->type==EVENT_TYPE_STOPREC){
-                	printf("Scheduled stop recording request...");
-                	int stopped = stopRecording(global,current->internalId,current->externalId);
-                    if(!stopped) {
-                        printf("Recording not in progress, stop request ignored\n");
-                    } else {
-                        printf("Recording stopped.\n");
-                    }
-                }
-                else if(current->type==EVENT_TYPE_CHANNEL){
-                	//Not implemented yet!
-        			if(current->externalId!=UIExtID && current->externalId!=SocketExtED){
-        				free(current->externalId);
-        			}
-        			if(current->internalId!=UIIntID && current->internalId!=SocketIntED){
-        				free(current->internalId);
-        			}
-                }
-
-                //event has been processed, remove event from queue.
-                if(current->next!=NULL){
-                    //update the global list.
-                    global->events = current->next;
-                    //free up the event.
-                    free(current->data);
-                    //free up the ids
-        			if(current->externalId!=UIExtID && current->externalId!=SocketExtED){
-        				free(current->externalId);
-        			}
-        			if(current->internalId!=UIIntID && current->internalId!=SocketIntED){
-        				free(current->internalId);
-        			}
-                    //free the event struct itself.
-                    free(current);
-                    //move to the next event.
-                    current=global->events;
-                    done=difftime(current->eventTime,now);
-                }else{
-                    //no next event.. exit while loop.. sleep for a second.
-                    done=0;
-                    global->events = NULL;
-                    free(current->data);
-                    free(current);
-                }
-            }
-        }
-        pthread_mutex_unlock(&(global->eventLock));
-    }
     return 0;
 }
 
@@ -395,8 +242,6 @@ void collapseFdArrays(struct shared *global){
             if(writepos!=outfdcount) {
                 //move the data back to the writepos slot, and set self to -1..
                 global->outfds[writepos] = global->outfds[outfdcount];
-                global->outfdIntIds[writepos] = global->outfdIntIds[outfdcount];
-                global->outfdExtIds[writepos] = global->outfdExtIds[outfdcount];
                 global->outfds[outfdcount] = -1;
             }
             writepos++;
@@ -406,30 +251,6 @@ void collapseFdArrays(struct shared *global){
     }
 }
 
-void sendBufferToFds(char *buffer, struct shared *global){
-    pthread_mutex_lock(&(global->sharedlock));
-    int outfdcount;
-    //iterate over the output fd's.. set them to -1 if they fail to write.
-    for(outfdcount=0; outfdcount<(global->recording); outfdcount++) {
-        if(global->outfds[outfdcount]!=-1) {
-            ssize_t written = write(global->outfds[outfdcount], buffer, MEMBUF_SIZE);
-            if(written==-1) {
-                global->outfds[outfdcount]=-1;
-            } else {
-                fsync(global->outfds[outfdcount]);
-            }
-        }
-    }
-
-    //we're still holding the global lock.. so we can manipulate the recording count,
-    //and move the contents of the outfds array around without fear of a new client corrupting us.
-
-    //iterate over the outputfd's.. collapsing the array to move the valids to the front.
-    collapseFdArrays(global);
-
-    pthread_mutex_unlock(&(global->sharedlock));
-}
-
 void sendBuffersToFds(int buffersToWrite, struct shared *global){
     pthread_mutex_lock(&(global->sharedlock));
     int outfdcount;
@@ -437,18 +258,18 @@ void sendBuffersToFds(int buffersToWrite, struct shared *global){
     //iterate over the output fd's.. set them to -1 if they fail to write.
     for(outfdcount=0; outfdcount<(global->recording); outfdcount++) {
         if(global->outfds[outfdcount]!=-1) {
-        	for(buffercount=0; buffercount<buffersToWrite; buffercount++){
-				ssize_t written = write(global->outfds[outfdcount], global->data[buffercount], MEMBUF_SIZE);
-				if(written==-1) {
-					global->outfds[outfdcount]=-1;
-				}
-        	}
+                for(buffercount=0; buffercount<buffersToWrite; buffercount++){
+                                ssize_t written = write(global->outfds[outfdcount], global->data[buffercount], MEMBUF_SIZE);
+                                if(written==-1) {
+                                        global->outfds[outfdcount]=-1;
+                                }
+                }
         }
     }
     //now issue the flushes.
     for(outfdcount=0; outfdcount<(global->recording); outfdcount++) {
         if(global->outfds[outfdcount]!=-1) {
-			fsync(global->outfds[outfdcount]);
+                        fsync(global->outfds[outfdcount]);
         }
     }
 
@@ -461,7 +282,7 @@ void sendBuffersToFds(int buffersToWrite, struct shared *global){
     pthread_mutex_unlock(&(global->sharedlock));
 }
 
-void *DiskIOHandler(void* lp) {
+void *IOHandler(void* lp) {
     struct shared *global = (struct shared *)lp;
 
     int bufferstowrite=0;
@@ -514,7 +335,7 @@ void *DiskIOHandler(void* lp) {
             }else{
                 //we have buffers to write.. write out as many as we know there are
                 //(there may be more to write by now.. if so we deal with them next loop)
-            	sendBuffersToFds(bufferstowrite,global);
+                sendBuffersToFds(bufferstowrite,global);
 
                 //we've written buffers..
                 // so now we move the buffers still to write to the front of the write array
@@ -544,7 +365,7 @@ void *DiskIOHandler(void* lp) {
     return 0;
 }
 
-//Device read thread.. pulls data from device, writes it to sockets / buffered writer.
+//Device read thread.. pulls data from device, writes it to sockets
 void *StreamHandler(void* lp) {
     struct shared *global = (struct shared *)lp;
     int devfd;
@@ -557,7 +378,7 @@ void *StreamHandler(void* lp) {
     struct tm* tm_info;
     int retval;
 
-    ifname = "/dev/video0"; //TODO: make this an arg ;p
+    ifname = "/dev/video0"; //TODO: make this an arg 
     if(NULL == (membuf = malloc(MEMBUF_SIZE))) {
         printf("Not enough memory to allocate buffer\n");
         fprintf(stderr, "Not enough memory\n");
@@ -568,8 +389,9 @@ void *StreamHandler(void* lp) {
         pthread_mutex_lock(&(global->sharedlock));
         enabled = global->recording;
         pthread_mutex_unlock(&(global->sharedlock));
+	// Wait for someone to connect
         while(!enabled) {
-            sleep(1);
+            usleep(500);
             pthread_mutex_lock(&(global->sharedlock));
             enabled = global->recording;
             pthread_mutex_unlock(&(global->sharedlock));
@@ -621,8 +443,8 @@ void *StreamHandler(void* lp) {
                 } else {
                     fds[0].fd = devfd;
                     fds[0].events = POLLIN;
-                    fprintf(stderr,"%s Device reaquired. Usleep for data\n",buffer);
-                    usleep(1000);
+                    fprintf(stderr,"%s Device reaquired. Wait for data\n",buffer);
+                    usleep(500);
                     continue;
                 }
             } else if(-1 == retval) {
@@ -718,71 +540,6 @@ void *StreamHandler(void* lp) {
     return 0;
 }
 
-struct post_data *getPostData(char *buffer){
-    //find \n\n
-    char *post=NULL;
-    post=strstr(buffer,"\r\n\r\n") + 4;
-    if(post==NULL){
-        post = strstr(buffer,"\n\n") + 2;
-    }
-    struct post_data *data = (struct post_data *)calloc(1,sizeof(struct post_data));
-    if(post==NULL){
-        data->noOfKeys=0;
-        return data;
-    }
-    int postidx = post-buffer;
-
-    //how many ampersands are there..
-    int ampcount=1;
-    int idx=postidx;
-    while(buffer[idx]!=0){
-        if(buffer[idx]=='&'){
-            ampcount++;
-        }
-        idx++;
-    }
-    data->keys = (char **)calloc(ampcount,sizeof(char *));
-    data->values = (char **)calloc(ampcount,sizeof(char *));
-
-    idx=0;
-    //parse next string with &'s
-    char *keyvalue=strtok(post,"&");
-    int i=0;
-    while(keyvalue!=NULL){
-        data->keys[idx]=keyvalue;
-        for(i=0;i<strlen(keyvalue);i++){
-            if(keyvalue[i]=='='){
-                keyvalue[i]=0;
-                data->values[idx]=&keyvalue[i+1];
-            }
-        }
-        keyvalue=strtok(NULL,"&");
-        idx++;
-    }
-    data->noOfKeys = idx;
-    return data;
-}
-char *getValue(char *key, struct post_data *data){
-    int loop=0;
-    for(loop=0; loop<data->noOfKeys;loop++){
-        if(strcmp(key,data->keys[loop])==0){
-            return data->values[loop];
-        }
-    }
-    return NULL;
-}
-void dumpKeys(struct post_data *data){
-    printf("No of Keys %d\n",data->noOfKeys);
-    int i;
-    for(i=0; i<data->noOfKeys; i++){
-        printf(" key: %s\n",data->keys[i]);
-        printf(" val: %s\n",data->values[i]);
-        printf("getvalue : %s\n",getValue(data->keys[i],data));
-    }
-    printf("fish : %s\n",getValue("fish",data));
-    printf("fred : %s\n",getValue("fred",data));
-}
-
 int getIndex(char *needle, char *haystack){
     char *found = strstr(haystack,needle);
     if(found!=NULL){
@@ -790,18 +547,6 @@ int getIndex(char *needle, char *haystack){
     }else{
         return -1;
     }
-}
-
-void printTimestamp(){
-    char tbuf[80];
-    time_t timer;
-    struct tm* tm_info;
-    memset(tbuf,80,0);
-    memset(&timer,sizeof(time_t),0);
-    time(&timer);
-    tm_info = localtime(&timer);
-    strftime(tbuf,80,"%Y-%m-%d %H:%M:%S", tm_info);
-    printf("%s ",tbuf);
 }
 
 void return404(char *buffer, int csock, char *reason){
@@ -823,71 +568,6 @@ void return404(char *buffer, int csock, char *reason){
     }
     fsync(csock);
     close(csock);
-}
-
-void processFileRequest(char *buffer, int csock){
-    int fd;
-    int nbytes;
-    const int fbufsize=4096;
-    char fbuffer[4096];
-    char outbuf[1024];
-
-    //we know the request started with.. "GET /web/"
-    //so trim that off, and find the ending and turn the space before HTTP/1.X into a 0
-    char *file = buffer + strlen("GET /web/");
-    char* http = strstr(buffer," HTTP/1.");
-
-    if(http==NULL){
-        return404(buffer,csock,"File request missing trailing HTTP marker");
-        return;
-    }else{
-        http[0] = 0;
-
-        if(strstr(file,"..")){
-            return404(buffer,csock,"File request contained unsupported use of ..");
-            return;
-        }
-        //trim off any ? data.
-        if(strstr(file,"?")){
-            char *q = strstr(file,"?");
-            q[0]=0;
-        }
-
-        printTimestamp();
-        printf("Serving filename of %s\n",file);
-
-        fd = open(file,O_RDONLY);
-        if(fd==-1){
-            return404(buffer,csock,"Problem opening file for reading.");
-            return;
-        }
-
-        char *found = "HTTP/1.0 200 OK\n";
-        send(csock,found,strlen(found),0);
-
-        off_t len = lseek(fd,0,SEEK_END);
-        lseek(fd,0,SEEK_SET);
-        memset(outbuf,0,1024);
-        snprintf(outbuf,1023,"Content-Length: %d\n\n",(int)len);
-        send(csock,outbuf,strlen(outbuf),0);
-
-        nbytes = read(fd, fbuffer, fbufsize);
-        while(nbytes!=0){
-            if(nbytes==-1)
-            {
-                close(fd);
-                return404(buffer,csock,"\n\n!!!Problem reading file");
-                return;
-            }
-            send(csock,fbuffer,nbytes,0);
-            fsync(csock);
-            nbytes = read(fd, fbuffer, fbufsize);
-        }
-        close(fd);
-        fsync(csock);
-        close(csock);
-    }
-
 }
 
 void processStatusRequest(char *buffer, int csock, struct shared *global){
@@ -912,10 +592,7 @@ void processStatusRequest(char *buffer, int csock, struct shared *global){
         noofconnections = global->recording;
         recording = 0;
         for(idx=0; idx<global->recording; idx++){
-        	if(strcmp(global->outfdIntIds[idx],SocketIntED)!=0){
-        		recording = 1;
-        		break;
-        	}
+        	recording = 1;
         }
         pthread_mutex_unlock(&(global->sharedlock));
         pthread_mutex_lock(&(global->diskiolock));
@@ -934,612 +611,35 @@ void processStatusRequest(char *buffer, int csock, struct shared *global){
         snprintf(tbuf,80,  "Total Buffer Usage: %d\n",databuffers+freebuffers);
         send(csock,tbuf,strlen(tbuf),0);
 
-        pthread_mutex_lock(&(global->sharedlock));
-        for(idx=0; idx<global->recording; idx++){
-        	snprintf(tbuf,80,  "Client %d: %s / %s\n",idx,global->outfdIntIds[idx],global->outfdExtIds[idx]);
-            send(csock,tbuf,strlen(tbuf),0);
-        }
-        pthread_mutex_unlock(&(global->sharedlock));
-
-        fsync(csock);
-        close(csock);
-}
-
-void processStatusJSONRequest(char *buffer, int csock, struct shared *global){
-        char *text="HTTP/1.0 200 OK\nContent-Type: text/plain\n\n{\n  \"timestamp\":\"";
-        send(csock,text,strlen(text),0);
-        char tbuf[80];
-        time_t timer;
-        int idx;
-        struct tm* tm_info;
-        time(&timer);
-        tm_info = localtime(&timer);
-        strftime(tbuf,80,"%Y-%m-%d %H:%M:%S", tm_info);
-        send(csock,tbuf,strlen(tbuf),0);
-
-        //printf("%s Status request...\n",tbuf);
-        int history=0;
-        int freebuffers = 0;
-        int databuffers = 0;
-        int noofconnections = 0;
-        int recording = 0;
-        pthread_mutex_lock(&(global->sharedlock));
-        noofconnections = global->recording;
-        recording = 0;
-        for(idx=0; idx<global->recording; idx++){
-        	if(strcmp(global->outfdIntIds[idx],SocketIntED)!=0){
-        		recording = 1;
-        		break;
-        	}
-        }
-        pthread_mutex_unlock(&(global->sharedlock));
-        pthread_mutex_lock(&(global->diskiolock));
-        freebuffers = global->freecount;
-        databuffers = global->buffercount;
-        pthread_mutex_unlock(&(global->diskiolock));
-
-        snprintf(tbuf,80,"\",\n  \"connections\":\"%d\",",noofconnections);
-        send(csock,tbuf,strlen(tbuf),0);
-        snprintf(tbuf,80,  "\n  \"recording\":\"%d\",\n  ",recording);
-        send(csock,tbuf,strlen(tbuf),0);
-        snprintf(tbuf,80,  "\"currentFreeBuffers\":\"%d\",\n  ",freebuffers);
-        send(csock,tbuf,strlen(tbuf),0);
-        snprintf(tbuf,80,  "\"currentUsedBuffers\":\"%d\",\n  ",databuffers);
-        send(csock,tbuf,strlen(tbuf),0);
-        snprintf(tbuf,80,  "\"currentTotalBuffers\":\"%d\",\n  ",databuffers+freebuffers);
-        send(csock,tbuf,strlen(tbuf),0);
-        snprintf(tbuf,80,  "\"historyData\":[\n    {\"historyLength\":\"%d\",\"historyNowIndex\":\"%d\",\"counts\":[\n      ",MAX_BUFFER_COUNT_HISTORY,global->historyNowIndex);
-        send(csock,tbuf,strlen(tbuf),0);
-        for(history=0; history<MAX_BUFFER_COUNT_HISTORY; history++){
-            snprintf(tbuf,80,  "{\"free\":\"%d\",\"used\":\"%d\"},",global->historyFree[history],global->historyUsed[history]);
-            send(csock,tbuf,strlen(tbuf),0);
-        }
-        snprintf(tbuf,80,  "{\"free\":\"-1\",\"used\":\"-1\"}\n      ]\n    }\n  ]\n}");
-        send(csock,tbuf,strlen(tbuf),0);
-        fsync(csock);
-        close(csock);
-}
-
-int initiateRecording(struct shared *global, int outfd, char* intid, char* extid){
-	int started=0;
-	int idx;
-
-	//copy the intid/extid to storage we will free when the recording stops.
-	char *localintid = calloc(strlen(intid)+1, sizeof(char));
-	char *localextid = calloc(strlen(extid)+1, sizeof(char));
-	memcpy(localintid, intid, strlen(intid));
-	memcpy(localextid, extid, strlen(extid));
-
-    pthread_mutex_lock(&(global->sharedlock));
-    if(global->recording<MAX_BUFFERED_OUTPUTS) {
-    	//check we don't already have a recording live with this id pair.
-    	for(idx=0;idx<global->recording;idx++){
-    		if(strcmp(global->outfdExtIds[idx],extid)==0 && strcmp(global->outfdIntIds[idx],intid)==0){
-    			started = 1;
-    			break;
-    		}
-    	}
-    	if(!started){
-			global->outfds[global->recording]=outfd;
-			global->outfdIntIds[global->recording]=localintid;
-			global->outfdExtIds[global->recording]=localextid;
-			global->recording++;
-			started=1;
-    	}else{
-    		started=0;
-    	}
-    }
-    pthread_mutex_unlock(&(global->sharedlock));
-    return started;
-}
-
-void processStartRecRequest(char *buffer, int csock, struct shared *global, struct post_data *data){
-        char *text="HTTP/1.0 200 OK\nContent-Type: text/plain\n\nTold to Start Recording : Sent at : ";
-        send(csock,text,strlen(text),0);
-        int outfd;
-        char tbuf[80];
-        time_t timer;
-        struct tm* tm_info;
-        time(&timer);
-        tm_info = localtime(&timer);
-        strftime(tbuf,80,"%Y-%m-%d %H:%M:%S", tm_info);
-        send(csock,tbuf,strlen(tbuf),0);
-
-        printf("%s Start recording request...\n",tbuf);
-
-        strftime(tbuf,80,"%Y%m%d%H%M%S.ts", tm_info);
-        /** open the output file **/
-        if(-1 == (outfd = open(tbuf, O_CREAT | O_RDWR, S_IRWXU | S_IRWXG))) {
-            perror("Unable to open output file");
-        } else {
-        	char *intid = UIIntID;
-        	char *extid = UIExtID;
-        	if(data!=NULL){
-        		char *dintid = getValue("intID",data);
-        		char *dextid = getValue("extID",data);
-        		if(dintid!=NULL && dextid!=NULL){
-        			intid=dintid;
-        			extid=dextid;
-        		}
-        	}
-            int started=initiateRecording(global,outfd,intid,extid);
-            if(!started) {
-                char *alreadyrecording="\n\nAlready recording with current ID Pair, new request ignored\n";
-                send(csock,alreadyrecording,strlen(alreadyrecording),0);
-            } else {
-                char *nowrecording="\n\nRecording now in progress\n";
-                send(csock,nowrecording,strlen(nowrecording),0);
-            }
-        }
-
-        fsync(csock);
-        close(csock);
-}
-
-int stopRecording(struct shared *global, char* intid, char* extid){
-	int stopped = 0;
-    int idx=0;
-    int stopEverything = strlen(intid)==0 && strlen(extid)==0;
-    pthread_mutex_lock(&(global->sharedlock));
-    if(global->recording>0) {
-    	for(idx=0;idx<global->recording;idx++){
-    		if(stopEverything || (strcmp(global->outfdExtIds[idx],extid)==0 && strcmp(global->outfdIntIds[idx],intid)==0)){
-    			if(global->outfds[idx]!=-1){
-					fsync(global->outfds[idx]);
-					close(global->outfds[idx]);
-    			}
-    			//yes, identity checks, not equality checks.. that's what's needed here!
-    			if(global->outfdExtIds[idx]!=UIExtID && global->outfdExtIds[idx]!=SocketExtED){
-    				free(global->outfdExtIds[idx]);
-    			}
-    			if(global->outfdIntIds[idx]!=UIIntID && global->outfdIntIds[idx]!=SocketIntED){
-    				free(global->outfdIntIds[idx]);
-    			}
-    			global->outfds[idx] = -1;
-    			stopped = 1;
-    		}
-    	}
-    	if(stopped){
-    		collapseFdArrays(global);
-    	}
-    }
-    pthread_mutex_unlock(&(global->sharedlock));
-    return stopped;
-}
-
-void processStopRecRequest(char *buffer, int csock, struct shared *global, struct post_data *data){
-        char *text="HTTP/1.0 200 OK\nContent-Type: text/plain\n\nTold to Stop Recording : Sent at : ";
-        send(csock,text,strlen(text),0);
-        char tbuf[80];
-        time_t timer;
-        struct tm* tm_info;
-        time(&timer);
-        tm_info = localtime(&timer);
-        strftime(tbuf,80,"%Y-%m-%d %H:%M:%S", tm_info);
-        send(csock,tbuf,strlen(tbuf),0);
-
-        printf("%s Stop recording request...\n",tbuf);
-
-    	char *intid = UIIntID;
-    	char *extid = UIExtID;
-    	if(data!=NULL){
-    		char *dintid = getValue("intID",data);
-    		char *dextid = getValue("extID",data);
-    		if(dintid!=NULL && dextid!=NULL){
-    			intid=dintid;
-    			extid=dextid;
-    		}
-    	}
-
-        int stopped=stopRecording(global,intid,extid);
-        if(!stopped) {
-            char *notrecording="\n\nCould not find matching recording to stop, Stop request ignored\n";
-            send(csock,notrecording,strlen(notrecording),0);
-        } else{
-            char *stoppedok="\n\nRecording stopped.\n";
-            send(csock,stoppedok,strlen(stoppedok),0);
-        }
         fsync(csock);
         close(csock);
 }
 
 void processVideoRequest(char *buffer, int csock, struct shared *global){
+    char *text;
     if(global->recording < MAX_BUFFERED_OUTPUTS) {
-            char *text="HTTP/1.0 200 OK\nContent-Type: video/h264\nSync-Point: no\nPre-roll: no\nMedia-Start: invalid\nMedia-End: invalid\nStream-Start: invalid\nStream-End: invalid\n\n";
-            send(csock,text,strlen(text),0);
-            fsync(csock);
-
-            char ofname[80];
-            time_t curtime;
-            struct tm *fmttime;
-
-            /** set the output file name to time of creation **/
-            time(&curtime);
-            fmttime = localtime(&curtime);
-            strftime(ofname, 80, "%Y-%m-%d %H:%M:%S", fmttime);
-
-            printf("%s Start streaming request...\n",ofname);
-
-            pthread_mutex_lock(&(global->sharedlock));
-            global->outfds[global->recording]=csock;
-            global->outfdIntIds[global->recording]=SocketIntED;
-            global->outfdExtIds[global->recording]=SocketExtED;
-            global->recording++;
-            pthread_mutex_unlock(&(global->sharedlock));
-        }
-}
-
-void processListEvents(char *buffer, int csock, struct shared *global, char *newId){
-   char *event1="HTTP/1.0 200 OK\nContent-Type: text/plain\n\n{\n";
-   char *event2=" \"events\":[\n";
-   char *sep = ",\n";
-   char *endtext="  ] \n} \n";
-   char *endevent="\"}";
-   char outbuf[80];
-   char timebuf[80];
-   struct tm *fmttime;
-
-   send(csock,event1,strlen(event1),0);
-   fsync(csock);
-
-   if(newId!=NULL){
-       snprintf(outbuf,80," \"addedId\":\"%s\",",newId);
-       send(csock,outbuf,strlen(outbuf),0);
-       fsync(csock);
-   }
-
-   send(csock,event2,strlen(event2),0);
-   fsync(csock);
-
-   //printf("Waiting on lock");
-
-   pthread_mutex_lock(&(global->eventLock));
-   //printf("processing event list.. events present? %d\n",(global->events==NULL?0:1));
-   struct event *current = global->events;
-   while(current!=NULL){
-        fmttime = localtime(&(current->eventTime));
-        strftime(timebuf, 80, "%Y-%m-%d %H:%M:%S", fmttime);
-        snprintf(outbuf,80,"  { \"eventTime\":\"%s\",\"eventType\":\"%d\",\"eventData\":\"",timebuf,current->type);
-        send(csock,outbuf,strlen(outbuf),0);
-        fsync(csock);
-        if(current->data!=NULL){
-        	send(csock,current->data,strlen(current->data),0);
-        	fsync(csock);
-        }
-        snprintf(outbuf,80,"\",\"intID\":\"%s\"",current->internalId);
-        send(csock,outbuf,strlen(outbuf),0);
-        fsync(csock);
-        snprintf(outbuf,80,",\"extID\":\"%s",current->externalId);
-        send(csock,outbuf,strlen(outbuf),0);
-        fsync(csock);
-        send(csock,endevent,strlen(endevent),0);
-        fsync(csock);
-        current = current->next;
-        if(current!=NULL){
-            send(csock,sep,strlen(sep),0);
-            fsync(csock);
-        }
-   }
-   pthread_mutex_unlock(&(global->eventLock));
-   //printf("done\n");
-   send(csock,endtext,strlen(endtext),0);
-   fsync(csock);
-   close(csock);
-}
-
-char *generateId(){
-    char *obuf = calloc(81,sizeof(char));
-    char tbuf[80]= {0};
-    time_t timer;
-    struct tm* tm_info;
-    time(&timer);
-    tm_info = localtime(&timer);
-    strftime(tbuf,80,"%Y%m%d%H%M%S", tm_info);
-    struct timeval tv;
-    gettimeofday(&tv,NULL);
-    long t = tv.tv_usec;
-    snprintf(obuf,80,"%s%ld",tbuf,t);
-    return obuf;
-}
-
-void processAddEvent(char *buffer, int csock, struct shared *global, struct post_data *post){
-	char *genfilename=NULL;
-	char *genshowid=NULL;
-	char *genid=NULL;
-
-	char *filename=NULL;
-	char *showid=NULL;
-	char *data=NULL;
-
-
-    //Init the mandatory data for all events.. time, intid,extid.
-    //(intid is generated if absent).
-
-    char *timestring = "time";
-    char *time = getValue(timestring,post);
-    if(time==NULL){
-       return404(buffer,csock,"No time in addEvent request");
-       return;
+            text="HTTP/1.0 200 OK\nContent-Type: video/h264\nSync-Point: no\nPre-roll: no\nMedia-Start: invalid\nMedia-End: invalid\nStream-Start: invalid\nStream-End: invalid\n\n";
+    } else {
+            text="HTTP/1.0 503 Service Unavailable\n\n";
     }
-    char *myidstring = "intId";
-    char *myid = getValue(myidstring,post);
-    if(myid==NULL){
-    	myid = generateId();
-    	genid=myid;
-    }
-    char *theiridstring = "extId";
-    char *theirid = getValue(theiridstring,post);
-    if(theirid==NULL){
-        return404(buffer,csock,"No externalId in addEvent request");
-        if(genid!=NULL)
-        	free(genid);
-        return;
-    }
+    send(csock,text,strlen(text),0);
+    fsync(csock);
 
-    char *typestring = "type";
-    char *typec = getValue(typestring,post);
-    if(typec==NULL){
-       return404(buffer,csock,"No type in addEvent request");
-       if(genid!=NULL)
-       	free(genid);
-       return;
-    }
-    int type = atoi(typec);
-    //ok, we have a type.. what options are valid for type?
-    if(type==EVENT_TYPE_ECHO){
-    	//ECHO
-        char *datastring = "data";
-        data = getValue(datastring,post);
-        if(data==NULL){
-            return404(buffer,csock,"Echo event with no data specified.");
-            if(genid!=NULL)
-            	free(genid);
-            return;
-        }
-    }else if (type==EVENT_TYPE_STARTREC){
-    	//START
-        char *filenamestring = "filename";
-        filename = getValue(filenamestring,post);
-        if(filename==NULL){
-        	//filename is optional..
-        	filename = calloc(strlen(myid)+4,sizeof(char));
-        	memcpy(filename,myid,strlen(myid));
-        	memcpy(filename+strlen(myid), ".ts", 3);
-        	genfilename=filename;
-        }
-        char *showidstring = "showid";
-        showid = getValue(showidstring,post);
-        if(showid==NULL){
-           //show id is also optional..
-           showid = calloc(5,sizeof(char));
-           memcpy(showid, "auto", 3);
-           genshowid=showid;
-        }
-    }else if (type==EVENT_TYPE_STOPREC){
-    	//STOP
-    	//stop has no data beyond the ids.
-    }else if (type==EVENT_TYPE_CHANNEL){
-    	//CHANNEL
-        char *datastring = "data";
-        data = getValue(datastring,post);
-        if(data==NULL){
-            return404(buffer,csock,"Channel change event with no data specified.");
-            return;
-        }
-    }
-
-    struct tm tm;
-    time_t t;
-    //format like this in html will get escaped to the below string..
-    //messy.. but cheap.
-    //"6 Dec 2001 12:33:45"
-    if (strptime(time, "%d+%b+%Y+%H%%3A%M%%3A%S", &tm) == NULL){
-       printf("Time string was %s\n",time);
-       return404(buffer,csock,"Invalid time format in addEvent request eg '2 Jan 2010 12:45:20' ");
-       if(genfilename!=NULL)
-       	free(genfilename);
-       if(genshowid!=NULL)
-       	free(genshowid);
-       if(genid!=NULL)
-       	free(genid);
-       return;
-    }
-    tm.tm_isdst = -1;      /* Not set by strptime(); tells mktime()
-                          to determine whether daylight saving time
-                          is in effect */
-    t = mktime(&tm);
-    if (t == -1){
-       return404(buffer,csock,"Unable to mktime from time buffer");
-       return;
-    }
-
-    //build the event structure.. all data in the structure MUST be copied
-    //or built within this method. The data referenced by args from this
-    //method are not valid once the request is complete.
-
-    struct event *event = calloc(1, sizeof(struct event));
-    event->eventTime = t;
-
-    if(type==EVENT_TYPE_STARTREC){
-		event->data = (char*)calloc(strlen(showid)+strlen(filename)+2,sizeof(char));
-		if(showid!=NULL){
-			memcpy(event->data,showid,strlen(showid));
-		}
-		memcpy(&(event->data[strlen(showid)]),"?",1);
-		if(filename!=NULL){
-			memcpy(&(event->data[strlen(showid)+1]),filename,strlen(filename));
-		}
-    }else{
-    	if(data!=NULL){
-			event->data = (char*)calloc(strlen(data)+1,sizeof(char));
-			memcpy(event->data,data,strlen(data));
-    	}else{
-    		event->data=NULL;
-    	}
-    }
-
-    event->type = type;
-
-    event->internalId = (char*)calloc(strlen(myid)+1,sizeof(char));
-    strcpy(event->internalId,myid);
-
-    event->externalId = (char*)calloc(strlen(theirid)+1,sizeof(char));
-    strcpy(event->externalId,theirid);
-
-    event->next = NULL;
-
-    //Event built.. insert into the list.
-
-    pthread_mutex_lock(&(global->eventLock));
-    struct event *current = global->events;
-    struct event *last = NULL;
-    int done=0;
-    if(current==NULL){
-        global->events = event;
-    }else{
-        while(current!=NULL){
-            //difftime gives positive if the 1st arg is in the future past the 2nd arg.
-            done=difftime(event->eventTime,current->eventTime);
-
-            //if result is negative, our event comes before the current one..
-            if(done<=0){
-                //tag the current one onto our next.
-                event->next = current;
-                if(last==NULL){
-                    global->events = event;
-                }else{
-                    last->next = event;
-                }
-                current=NULL;
-            }else{
-                //result was positive, our event comes after the current one.. so go looking for where.
-                last = current;
-                current = current->next;
-                //if there is no next coming up.. then we just became the end of the list.
-                if(current==NULL){
-                    last->next=event;
-                }
-            }
-        }
-    }
-    pthread_mutex_unlock(&(global->eventLock));
-
-    //release any temp strings used while building the event.
-    if(genfilename!=NULL)
-    	free(genfilename);
-    if(genshowid!=NULL)
-    	free(genshowid);
-    if(genid!=NULL)
-    	free(genid);
-
-    return processListEvents(buffer, csock, global, event->internalId);
-}
-
-void processRemoveEvent(char *buffer, int csock, struct shared *global, struct post_data *post){
-    char *myidstring = "intId";
-    char *myid = getValue(myidstring,post);
-    if(myid==NULL){
-        return404(buffer,csock,"No internalId in removeEvent request");
-        return;
-    }
-    char *theiridstring = "extId";
-    char *theirid = getValue(theiridstring,post);
-
-    //allow theirid to be null.. to delete all matching intids.
-	//    if(theirid==NULL){
-	//        return404(buffer,csock,"No externalId in removeEvent request");
-	//        return;
-	//    }
-
-    pthread_mutex_lock(&(global->eventLock));
-    struct event *current = global->events;
-    struct event *last = NULL;
-    if(current==NULL){
-        //no events to remove from.. event may have already fired.. c'est la vie.
-    }else{
-        while(current!=NULL){
-			if((theirid!=NULL && strcmp(current->externalId,theirid)==0) && strcmp(current->internalId,myid)==0){
-				//we have a match, so we will remove it.. so we'll free the data contained in it.
-    			if(current->externalId!=UIExtID && current->externalId!=SocketExtED){
-    				free(current->externalId);
-    			}
-    			if(current->internalId!=UIIntID && current->internalId!=SocketIntED){
-    				free(current->internalId);
-    			}
-    			free(current->data);
-				//found match... unhook it.
-    			if(last!=NULL){
-    				last->next=current->next;
-    			}else{
-    				//matched the 1st item.. rewrite the global..
-    				global->events=current->next;
-    			}
-				free(current);
-			}else{
-				last = current;
-			}
-        	current = current->next;
-        }
-    }
-    pthread_mutex_unlock(&(global->eventLock));
-
-    return processListEvents(buffer, csock, global,NULL);
-}
-
-void processPostRequest(char *buffer, int csock, struct shared *global){
-    struct post_data *data = getPostData(buffer);
-    char *actionString = "action";
-    char *action = getValue(actionString,data);
-    if(action==NULL){
-       return404(buffer,csock,"No action in post request");
-       return;
-    }else{
-        if(strcmp(action,"status")==0){
-            processStatusRequest(buffer,csock,global);
-        }else if(strcmp(action,"jstatus")==0){
-            processStatusJSONRequest(buffer,csock,global);
-        }else if(strcmp(action,"startrec")==0){
-            processStartRecRequest(buffer,csock,global,data);
-        }else if(strcmp(action,"stoprec")==0){
-            processStopRecRequest(buffer,csock,global,data);
-        }else if(strcmp(action,"listevents")==0){
-            processListEvents(buffer,csock,global,NULL);
-        }else if(strcmp(action,"addevent")==0){
-            processAddEvent(buffer,csock,global,data);
-        }else if(strcmp(action,"removeevent")==0){
-            processRemoveEvent(buffer,csock,global,data);
-        }else{
-            char *text="HTTP/1.0 200 OK\nContent-Type: text/plain\n\nUnknown action requested : ";
-            send(csock,text,strlen(text),0);
-            fsync(csock);
-            send(csock,action,strlen(action),0);
-            fsync(csock);
-        }
-    }
-    if(data!=NULL){
-    	free(data->keys);
-    	free(data->values);
-        free(data);
+    if(global->recording < MAX_BUFFERED_OUTPUTS) {
+	    pthread_mutex_lock(&(global->sharedlock));
+	    global->outfds[global->recording]=csock;
+	    global->recording++;
+	    pthread_mutex_unlock(&(global->sharedlock));
     }
 }
 
 void processHttpRequest(char *buffer, int csock, struct shared *global){
-    if(getIndex("GET /web/",buffer)==0){
-        processFileRequest(buffer,csock);
+    if(getIndex("GET /video HTTP/1.1",buffer)==0){
+        processVideoRequest(buffer,csock,global);
     }else if(getIndex("GET /status HTTP/1.1",buffer)==0){
         processStatusRequest(buffer,csock,global);
-    }else if(getIndex("GET /startrec HTTP/1.1",buffer)==0){
-        processStartRecRequest(buffer,csock,global,NULL);
-    }else if(getIndex("GET /stoprec HTTP/1.1",buffer)==0){
-        processStopRecRequest(buffer,csock,global,NULL);
-    }else if(getIndex("GET /video HTTP/1.1",buffer)==0){
-        processVideoRequest(buffer,csock,global);
     }else if(getIndex("GET /favicon.ico HTTP/1.",buffer)==0){
         return404(buffer,csock,"We don't do Favicons =)");
-    }else if(getIndex("GET /jstatus HTTP/1.1",buffer)==0){
-        processStatusJSONRequest(buffer,csock,global);
-    }else if(getIndex("POST /action HTTP/1.1",buffer)==0){
-        processPostRequest(buffer,csock,global);
     }else{
         return404(buffer,csock,"Unknown request");
     }
