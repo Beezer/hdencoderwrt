@@ -1,6 +1,8 @@
 LDFLAGS=-lpthread
-hdpvrd: hdpvrd.o
-	$(CC) $(LDFLAGS) hdpvrd.o -o hdpvrd
+OBJECTS         = hdpvrd.o 
+
+hdpvrd: $(OBJECTS)
+	$(CC) $(LDFLAGS) $(OBJECTS) -o hdpvrd
 hdpvrd.o: hdpvrd.c
 	$(CC) $(CFLAGS) -c hdpvrd.c
 
