@@ -4,7 +4,7 @@ I wanted to be able to stream live HDTV from my living room to Samsung smart TV'
 The aim of this project is to provide a plug and play solution.
 
 # Hauppauge HD-PVR 
-!(https://www.wheep.co.uk/images/180px-Hd_pvr_small.jpg)
+![](https://www.wheep.co.uk/images/180px-Hd_pvr_small.jpg)
 
 This is a self-contained device that accepts HD component video, encodes it to a h264 video stream and makes it available to a computer via USB. The computer does not have to do any encoding or stream packaging itself. 
 
@@ -14,7 +14,7 @@ Note, you must use either the Hauppauge HD-PVR models 1212 or 1445. Please check
 If your video source only has HDMI, you can use a converter like this [Portta HDMI to component video converter](http://www.amazon.co.uk/gp/product/B00A8FIQXA)
 
 # TPLink TL-WR703N 
-!(https://www.wheep.co.uk/images/tl-wr703n_1.jpg)
+![](https://www.wheep.co.uk/images/tl-wr703n_1.jpg)
 
 This device is popular amongst hobbyists because it's small, cheap and capable of running custom firmware. It has a both a wired network port and wireless, and a usb 2 port for connecting the HD-PVR.
 
