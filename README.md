@@ -51,10 +51,7 @@ instructions at http://wiki.openwrt.org/doc/howto/generic.sysupgrade
 There are no configurable options on this firmware. Flash it, plug your HDPVR into
 the USB port, then point your video player at the video streaming URL:-
 
-http://<IP OF BOX>:1101/video
-
-There is also a status page at "http://<IP OF BOX>:1101/status"
-
+http://IP OF BOX:1101/video
 
 If you really want to change encoder settings, please read the page at:-
 
