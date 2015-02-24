@@ -50,6 +50,9 @@ struct data {
 
 int main(int argv, char **argc)
 {
+
+	signal(SIGPIPE, SIG_IGN);
+
 	// Set up logging
         openlog("hdpvrd", LOG_PID|LOG_CONS|LOG_PERROR, LOG_DAEMON);
         syslog(LOG_INFO, "Starting");
